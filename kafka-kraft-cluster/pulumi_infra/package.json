@@ -1,0 +1,16 @@
+{
+    "name": "kafka-kraft-cluster",
+    "main": "index.ts",
+    "devDependencies": {
+        "@types/node": "^18",
+        "typescript": "^5.0.0"
+    },
+    "dependencies": {
+        "@pulumi/gcp": "^9.0.0",
+        "@pulumi/pulumi": "^3.113.0",
+        "@pulumi/random": "^4.21.2"
+    },
+    "allowScripts": {
+        "@pulumi/random@4.21.2": true
+    }
+}

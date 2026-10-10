@@ -1,0 +1,46 @@
+name: Terraform stack setup
+description: >
+  Installs Terraform, writes one stack's terraform.tfvars and backend.hcl from
+  repository secrets/variables, and runs terraform init against its GCS state.
+  Expects the job to have already authenticated to GCP.
+
+inputs:
+  stack:
+    description: Stack directory (crdb-cluster, kafka-kraft-cluster, or python-feeder)
+    required: true
+  tfvars:
+    description: Full contents of the stack's terraform.tfvars (from a repository secret)
+    required: true
+  state-bucket:
+    description: GCS bucket holding this stack's Terraform state
+    required: true
+  terraform-version:
+    description: Terraform CLI version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false   # keeps `terraform output` clean for scripting
+
+    - name: Write tfvars and backend config
+      shell: bash
+      working-directory: ${{ inputs.stack }}/terraform_infra
+      env:
+        TFVARS: ${{ inputs.tfvars }}
+        BUCKET: ${{ inputs.state-bucket }}
+      run: |
+        if [ -z "$TFVARS" ] || [ -z "$BUCKET" ]; then
+          echo "::error::Missing tfvars secret or state bucket variable for ${{ inputs.stack }}"
+          exit 1
+        fi
+        printf '%s\n' "$TFVARS" > terraform.tfvars
+        printf 'bucket = "%s"\n' "$BUCKET" > backend.hcl
+
+    - name: terraform init
+      shell: bash
+      working-directory: ${{ inputs.stack }}/terraform_infra
+      run: terraform init -input=false -backend-config=backend.hcl

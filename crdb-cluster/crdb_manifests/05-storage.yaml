@@ -1,0 +1,128 @@
+# Local storage backed by the dedicated crdb-data disk already attached to
+# each node by Terraform (see main.tf's google_compute_disk.crdb_data and
+# the mount step in templates/rke2-startup.sh.tpl). RKE2 doesn't ship a
+# default StorageClass, so without this the StatefulSet's PVCs have nothing
+# to bind to.
+#
+# NOTE: capacity below (30Gi) must match var.data_disk_size_gb in
+# variables.tf. If you resize that variable, update these to match — a PV's
+# declared capacity doesn't grow on its own even if the underlying disk did.
+#
+# NOTE: one PV per node is listed here (0-4). If you raise node_count again,
+# add a matching PV block for each new node before scaling the StatefulSet.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: crdb-data-pv-0
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/crdb-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - crdb-lab-node-0
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: crdb-data-pv-1
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/crdb-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - crdb-lab-node-1
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: crdb-data-pv-2
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/crdb-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - crdb-lab-node-2
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: crdb-data-pv-3
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/crdb-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - crdb-lab-node-3
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: crdb-data-pv-4
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/crdb-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - crdb-lab-node-4

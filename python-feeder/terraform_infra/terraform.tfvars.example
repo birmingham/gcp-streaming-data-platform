@@ -1,0 +1,14 @@
+project_id              = "CHANGE_ME"
+region                  = "CHANGE_ME"
+feeder_image            = "CHANGE_ME"
+kafka_bootstrap_servers = "CHANGE_ME"
+crdb_conn_string        = "CHANGE_ME"
+
+# A genuine circular dependency between feeder and kafka specifically (crdb isn't part of the cycle yet,
+# since its tfvars hasn't been given feeder_network_name yet).
+# The way to break a peering cycle like this is to defer one side's peering by one apply cycle. 
+
+# Here's the sequence:
+# Temporarily blank both peering targets in python-feeder/terraform_infra/terraform.tfvars
+crdb_network_name  = "CHANGE_ME"
+kafka_network_name = "CHANGE_ME"

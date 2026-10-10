@@ -1,0 +1,57 @@
+# ---- Terraform ----
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Real variable values and backend config stay local; commit the .example files
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+backend.hcl
+!backend.hcl.example
+# Keep .terraform.lock.hcl committed (pins provider versions)
+
+# ---- RKE2 / Rancher / Kubernetes ----
+*kubeconfig*.yaml
+*.kubeconfig
+rke2.yaml
+node-token
+*token*.txt
+
+# ---- CockroachDB certs and keys ----
+certs/
+*.key
+*.crt
+*.pem
+
+# ---- GCP credentials ----
+*-sa-key.json
+*-key.json
+credentials.json
+application_default_credentials.json
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ---- Node / Pulumi ----
+node_modules/
+Pulumi.*.yaml
+!Pulumi.*.yaml.example
+
+# ---- Python ----
+env/
+.venv/
+__pycache__/
+*.pyc

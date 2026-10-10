@@ -1,0 +1,204 @@
+name: apply
+
+# Builds (or rebuilds) the full platform in dependency order:
+#   1. feeder VPC exists (bootstraps it with peering disabled if missing)
+#   2. Kafka and CockroachDB in parallel, both peering to the feeder VPC
+#   3. CockroachDB manifests applied on the fresh RKE2 cluster
+#   4. feeder re-applied with peering on and fresh Kafka/CockroachDB endpoints
+# See README_CI_Workflows/CI_Workflows_Setup.md for required secrets and variables.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC token for Workload Identity Federation
+
+concurrency:
+  group: platform-infra   # shared with destroy.yml so the two never overlap
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'us-west1' }}
+  ZONE: ${{ vars.GCP_ZONE || 'us-west1-a' }}
+  TF_VERSION: ${{ vars.TF_VERSION || '1.9.8' }}
+  FEEDER_NETWORK: python-feeder-network
+  CRDB_NETWORK: crdb-lab-network
+  KAFKA_NETWORK: kafka-kraft-network
+  CRDB_NODE0: crdb-lab-node-0
+  CRDB_NODE_COUNT: "5"
+
+jobs:
+  feeder-bootstrap:
+    name: Feeder VPC (bootstrap if missing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Check for existing feeder network
+        id: check
+        run: |
+          if gcloud compute networks describe "$FEEDER_NETWORK" --project "$PROJECT_ID" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Feeder network exists; no bootstrap needed."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Feeder network not found; bootstrapping with peering disabled."
+          fi
+
+      - uses: ./.github/actions/tf-setup
+        if: steps.check.outputs.exists == 'false'
+        with:
+          stack: python-feeder
+          tfvars: ${{ secrets.TFVARS_FEEDER }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_FEEDER }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: Apply feeder with peering disabled
+        if: steps.check.outputs.exists == 'false'
+        working-directory: python-feeder/terraform_infra
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="crdb_network_name=" -var="kafka_network_name="
+
+  kafka:
+    name: Kafka KRaft cluster
+    needs: feeder-bootstrap
+    runs-on: ubuntu-latest
+    outputs:
+      bootstrap_servers: ${{ steps.out.outputs.bootstrap_servers }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: kafka-kraft-cluster
+          tfvars: ${{ secrets.TFVARS_KAFKA }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_KAFKA }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: terraform apply
+        working-directory: kafka-kraft-cluster/terraform_infra
+        run: terraform apply -auto-approve -input=false
+
+      - name: Capture bootstrap servers
+        id: out
+        working-directory: kafka-kraft-cluster/terraform_infra
+        run: |
+          BOOTSTRAP=$(terraform output -json bootstrap_servers \
+            | jq -r 'if type == "array" then join(",") else . end')
+          echo "bootstrap_servers=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
+          echo "Kafka bootstrap servers: $BOOTSTRAP"
+
+  crdb:
+    name: CockroachDB on RKE2
+    needs: feeder-bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      node0_ip: ${{ steps.out.outputs.node0_ip }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: crdb-cluster
+          tfvars: ${{ secrets.TFVARS_CRDB }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_CRDB }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: terraform apply
+        working-directory: crdb-cluster/terraform_infra
+        run: terraform apply -auto-approve -input=false
+
+      - name: Capture node 0 internal IP
+        id: out
+        working-directory: crdb-cluster/terraform_infra
+        run: |
+          NODE0_IP=$(terraform output -json node_internal_ips | jq -r '
+            if type == "array" then .[0]
+            elif type == "object" then (to_entries | sort_by(.key) | .[0].value)
+            else . end')
+          echo "node0_ip=$NODE0_IP" >> "$GITHUB_OUTPUT"
+          echo "CockroachDB node 0 IP: $NODE0_IP"
+
+      - name: Copy manifests to node 0 over IAP (retries while the VM boots)
+        run: |
+          for i in $(seq 1 30); do
+            if gcloud compute scp --recurse \
+                crdb-cluster/crdb_manifests crdb-cluster/scripts/ci-apply-manifests.sh \
+                "$CRDB_NODE0":~/ \
+                --zone "$ZONE" --project "$PROJECT_ID" \
+                --tunnel-through-iap --quiet --strict-host-key-checking=no; then
+              exit 0
+            fi
+            echo "Node 0 not reachable yet (attempt $i/30); retrying in 20s"
+            sleep 20
+          done
+          echo "::error::Could not reach $CRDB_NODE0 over IAP"
+          exit 1
+
+      - name: Wait for RKE2, apply manifests, wait for CockroachDB
+        run: |
+          gcloud compute ssh "$CRDB_NODE0" \
+            --zone "$ZONE" --project "$PROJECT_ID" \
+            --tunnel-through-iap --quiet --strict-host-key-checking=no \
+            --command "bash ~/ci-apply-manifests.sh $CRDB_NODE_COUNT ~/crdb_manifests"
+
+  feeder:
+    name: Feeder (peering on, fresh endpoints)
+    needs: [kafka, crdb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: python-feeder
+          tfvars: ${{ secrets.TFVARS_FEEDER }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_FEEDER }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: Build CockroachDB connection string
+        env:
+          TEMPLATE: ${{ secrets.CRDB_CONN_STRING_TEMPLATE }}
+          NODE0_IP: ${{ needs.crdb.outputs.node0_ip }}
+        run: |
+          CONN="${TEMPLATE//__NODE_IP__/$NODE0_IP}"
+          echo "::add-mask::$CONN"
+          echo "CRDB_CONN=$CONN" >> "$GITHUB_ENV"
+
+      - name: terraform apply
+        working-directory: python-feeder/terraform_infra
+        env:
+          BOOTSTRAP: ${{ needs.kafka.outputs.bootstrap_servers }}
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="crdb_network_name=$CRDB_NETWORK" \
+            -var="kafka_network_name=$KAFKA_NETWORK" \
+            -var="kafka_bootstrap_servers=$BOOTSTRAP" \
+            -var="crdb_conn_string=$CRDB_CONN"
+
+      - name: Verify VPC peerings
+        run: |
+          for NET in "$FEEDER_NETWORK" "$CRDB_NETWORK" "$KAFKA_NETWORK"; do
+            echo "== $NET =="
+            gcloud compute networks peerings list --network="$NET" --project "$PROJECT_ID"
+          done

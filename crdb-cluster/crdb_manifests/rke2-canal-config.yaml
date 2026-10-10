@@ -1,0 +1,20 @@
+# RKE2's default CNI (Canal: Calico for policy, Flannel/VXLAN for inter-node
+# data path) assumes a standard 1500-byte host network unless told otherwise.
+# GCP's actual VPC MTU is 1460, and VXLAN encapsulation adds ~50 bytes of its
+# own overhead on top of that. Left at defaults, pod-to-pod packets can end
+# up sized for a 1500-byte path that doesn't actually exist, causing
+# connections to establish fine (small packets, handshakes) but silently
+# drop or stall once real traffic exceeds the true path MTU — since VXLAN
+# encapsulation also makes it hard for the standard ICMP "fragmentation
+# needed" signal to ever reach the original sender.
+#
+# 1460 (GCP host MTU) - 50 (VXLAN overhead) = 1410
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-canal
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    calico:
+      vethuMTU: "1410"

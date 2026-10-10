@@ -1,0 +1,53 @@
+name: terraform-checks
+
+# Format and validate every stack on pull requests and pushes to main.
+# Needs no GCP credentials: init runs with -backend=false.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+      - ".github/workflows/terraform-checks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.tf"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: ${{ vars.TF_VERSION || '1.9.8' }}
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform fmt -check -recursive -diff
+
+  validate:
+    name: validate ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [crdb-cluster, kafka-kraft-cluster, python-feeder]
+    defaults:
+      run:
+        working-directory: ${{ matrix.stack }}/terraform_infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate

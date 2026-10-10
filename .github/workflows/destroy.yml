@@ -1,0 +1,118 @@
+name: destroy
+
+# Tears down CockroachDB and Kafka (deleting their data disks). The feeder
+# stack is kept by default; see README_CI_Workflows/CI_Workflows_Setup.md.
+#
+# Order: CockroachDB and Kafka first (in parallel), feeder last. While the
+# feeder VPC still exists, CockroachDB's and Kafka's peering lookups succeed.
+# The feeder destroy then overrides its own lookups, since its peers are gone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm. This deletes CockroachDB and Kafka data.'
+        required: true
+        type: string
+      destroy_feeder:
+        description: Also destroy python-feeder (full teardown; subnet release can take 1-2 hours)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: platform-infra   # shared with apply.yml
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  TF_VERSION: ${{ vars.TF_VERSION || '1.9.8' }}
+
+jobs:
+  guard:
+    name: Confirm destroy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation input
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "destroy" ]; then
+            echo "::error::Confirmation must be exactly \"destroy\". Nothing was changed."
+            exit 1
+          fi
+
+  crdb:
+    name: Destroy CockroachDB
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: crdb-cluster
+          tfvars: ${{ secrets.TFVARS_CRDB }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_CRDB }}
+          terraform-version: ${{ env.TF_VERSION }}
+      - name: terraform destroy
+        working-directory: crdb-cluster/terraform_infra
+        run: terraform destroy -auto-approve -input=false
+
+  kafka:
+    name: Destroy Kafka
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: kafka-kraft-cluster
+          tfvars: ${{ secrets.TFVARS_KAFKA }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_KAFKA }}
+          terraform-version: ${{ env.TF_VERSION }}
+      - name: terraform destroy
+        working-directory: kafka-kraft-cluster/terraform_infra
+        run: terraform destroy -auto-approve -input=false
+
+  feeder:
+    name: Destroy feeder (optional)
+    needs: [crdb, kafka]
+    if: inputs.destroy_feeder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: ./.github/actions/tf-setup
+        with:
+          stack: python-feeder
+          tfvars: ${{ secrets.TFVARS_FEEDER }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET_FEEDER }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: terraform destroy (peer lookups skipped; peer VPCs are gone)
+        id: destroy
+        continue-on-error: true
+        working-directory: python-feeder/terraform_infra
+        run: |
+          terraform destroy -auto-approve -input=false \
+            -var="crdb_network_name=" -var="kafka_network_name="
+
+      - name: Explain a subnet-release failure
+        if: steps.destroy.outcome == 'failure'
+        run: |
+          echo "::warning::Feeder destroy did not finish. If the error is resourceInUseByAnotherResource on python-feeder-subnet, Cloud Run Direct VPC egress is still releasing its reserved IPs (documented 1-2 hour delay; they cannot be deleted manually). Re-run this workflow with destroy_feeder in 1-2 hours."
+          exit 1

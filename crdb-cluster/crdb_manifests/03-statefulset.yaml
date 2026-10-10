@@ -1,0 +1,77 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cockroachdb-budget
+  namespace: cockroachdb
+  labels:
+    app: cockroachdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cockroachdb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cockroachdb
+  namespace: cockroachdb
+spec:
+  serviceName: cockroachdb
+  replicas: 5
+  selector:
+    matchLabels:
+      app: cockroachdb
+  template:
+    metadata:
+      labels:
+        app: cockroachdb
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - cockroachdb
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: cockroachdb
+        image: cockroachdb/cockroach:v23.2.6
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 26257
+          name: grpc
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: datadir
+          mountPath: /cockroach/cockroach-data
+        env:
+        - name: COCKROACH_CHANNEL
+          value: kubernetes-insecure
+        command:
+        - "/bin/sh"
+        - "-c"
+        - "/cockroach/cockroach start --insecure --advertise-host=$(hostname -f) --join=cockroachdb-0.cockroachdb,cockroachdb-1.cockroachdb,cockroachdb-2.cockroachdb,cockroachdb-3.cockroachdb,cockroachdb-4.cockroachdb --logtostderr=INFO --cache=25% --max-sql-memory=25% --http-addr=0.0.0.0"
+        readinessProbe:
+          httpGet:
+            path: /health?ready=1
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      terminationGracePeriodSeconds: 60
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: local-storage
+      resources:
+        requests:
+          storage: 200Gi
